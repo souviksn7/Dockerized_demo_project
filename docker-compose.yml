@@ -1,0 +1,174 @@
+version: '3.7'
+services:
+  # PostgreSQL Database
+  db:
+    ports:
+      - 5433:5432
+    image: postgres:latest
+    environment:
+      - POSTGRES_DB=Person_details
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=654321
+      - POSTGRES_HOST_AUTH_METHOD=trust
+    networks:
+      - app-network
+
+  # Spring Boot Application
+  backend:
+    build:
+      context: .
+      dockerfile: ./boot/Dockerfile
+    depends_on:
+      - db
+    volumes:
+      - ./Producer/target/Task-0.0.1-SNAPSHOT.jar:/usr/jar_file/Task-0.0.1-SNAPSHOT.jar
+    
+    environment:
+       - DB_HOST=db
+       - DB_PORT=5432
+       - DB_NAME=Person_details
+       - DB_USERNAME=postgres
+       - DB_PASSWORD=654321
+       - DB_INITIALIZE=true
+       - DB_HIBERNATE_DDL-AUTO=update
+       - DB_SHOW_SQL=true
+       - DB_FORMAT_SQL=true
+       - SERVER_PORT=8081
+    ports:
+      - "8081:8081"
+    networks:
+      - app-network
+
+   # Zookeeper
+  zookeeper:
+    image: wurstmeister/zookeeper
+    environment:
+      - ZOOKEEPER_TICK_TIME=2000
+    ports:
+      - "2181:2181"
+    networks:
+      - app-network
+
+  # Kafka
+  kafka:
+    image: wurstmeister/kafka
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_HOST: kafka
+      KAFKA_BROKER_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: INSIDE://kafka:9092,OUTSIDE://localhost:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+      KAFKA_LISTENERS: INSIDE://0.0.0.0:9092,OUTSIDE://0.0.0.0:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+      KAFKA_CREATE_TOPICS: "person-update-topic:1:1"
+    networks:
+      - app-network
+    healthcheck:
+      test: nc -vz kafka 9092 || exit -1
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+  # elasticsearch
+  elasticsearch:
+    container_name: elasticsearch
+    image: elasticsearch:7.9.1
+    environment:
+      - cluster.name=kafka-cluster
+      - bootstrap.memory_lock=true
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - xpack.security.enabled=false
+
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - 9200:9200
+      - 9300:9300
+    depends_on:
+      - kafka
+    stdin_open: true
+    tty: true
+    restart: always
+    networks:
+      - app-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "50"
+    healthcheck:
+      test: curl -u elastic:elastic -s -f elasticsearch:9200/_cat/health >/dev/null || exit 1
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # logstash
+  logstash:
+    container_name: logstash
+    image: logstash:7.9.1
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - ./boot/logstash-kafka.conf:/usr/share/logstash/pipeline/logstash-kafka.conf
+    ports:
+      - 5044:5044
+    depends_on:
+      - elasticsearch
+    stdin_open: true
+    tty: true
+    restart: always
+    networks:
+      - app-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "50"
+    healthcheck:
+      test: ["CMD", "curl", "--silent", "--fail", "http://logstash:9600"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+
+  # kibana
+  kibana:
+    container_name: kibana
+    image: kibana:7.9.1
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - 5601:5601
+    depends_on:
+      - elasticsearch
+    stdin_open: true
+    tty: true
+    restart: always
+    networks:
+      - app-network
+    links: ['elasticsearch']
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "50"
+    healthcheck:
+      test: curl --fail http://kibana:5601 || exit 1
+      interval: 30s
+      retries: 3
+      timeout: 10s
+
+networks:
+  app-network:
